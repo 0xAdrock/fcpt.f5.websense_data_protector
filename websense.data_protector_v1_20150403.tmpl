@@ -1,0 +1,482 @@
+cli admin-partitions {
+    update-partition Common
+}
+sys application template /Common/websense.data_protector {
+    actions {
+        definition {
+            html-help {
+                <p><b>Websense<sup>&reg;</sup> TRITON<sup>&reg;</sup> AP-DATA Protector</b></p>
+                <p>This template creates a 
+                   configuration optimized for delivering traffic to Websense TRITON&nbsp;AP-DATA protector via ICAP. </p>
+                <p>This iApp creates:</p>
+                <ul>
+                    <li>ICAP Server Pool</li>
+                    <li>ICAP Internal Virtual Server</li>
+                    <li>ICAP profile</li>
+                    <li>ICAP Request Adapt profile</li>
+                    <li>Health monitor</li>
+                </ul>
+                <p>The ICAP Request Adapt profile can then be applied to 
+                   an existing HTTP or HTTPS virtual server.  It may also be applied directly to
+                   the virtual server created by the F5 AirGap iApp.</p>
+                <p>Before you start: </p>
+                <ul>
+                   <li>Check <b>System</b>, <b>Resource Provisioning</b> to ensure that LTM (local traffic manager) is
+                    provisioned.</li>
+                <li>Set up Websense appliances.</li>
+                </ul>
+                <p><b>Websense Protector Server Pool</b></p>
+                <p>Configure the internal virtual server and pool for the ICAP service.</p>
+                <ul>
+                   <li>Select the type of load balancing to use, and specify the servers referred to by the
+                       virtual server the template creates. Until you specify at least one server here, the virtual
+                       server is not available.  <b>Predictive (node)</b> is the suggested load balancing
+                       method.</li>
+                   <li>If applicable, enable TCP request queuing, and specify a queue length and timeout for
+                       queued requests. A "0" (zero) value indicates unlimited.</li>
+                   <li>Select a health monitor applicable to Websense protector.</li>
+                </ul>
+                <p><b>Protocol Optimization and Security Questions</b></p>
+                <p>Specify whether clients are connecting over the LAN or WAN.  </p>
+                <p><b>Finalize, View, and Change</b></p>
+                <p>Check your settings and selections. </p>
+		<ul>
+		    <li>Click <b>Cancel</b> to abandon all settings and return to the Application Services List
+                   screen.</li>
+		   <li>Click <b>Repeat</b> to create application objects and begin another application using the
+                   same settings (except Name).</li>
+		   <li>Click <b>Finished</b> to create application objects and go to the
+                   application's properties screen. </li>
+		</ul>
+		<p>Once the application generates, you can see its constituent
+                   elements by clicking the application's name in the Application Services List screen and
+                   clicking the Components tab. You can modify the application by selecting the application's
+                   name in the Application Services list and clicking the Reconfigure tab.</p>
+            }
+            implementation {
+
+
+tmsh::log_dest file
+tmsh::log_level crit
+
+tmsh::include "f5.app_utils"
+
+# Version 1
+# Copyright 2015 Websense, Inc.  All Rights Reserved.
+
+# constants
+set NO_ANSWER "No"
+set YES_ANSWER "Yes"
+set WAN_OPTION "WAN"
+set EMPTY_STRING "EMPTY_STRING_NO_VALUE_PRESENT"
+set CREATE_NEW_POOL_OPTION "Create New Pool"
+set CREATE_NEW_MONITOR_OPTION "Create Custom Monitor"
+set CREATE_NEW_MONITOR_WEBSENSEPROTECTOR "Websense Protector"
+set CONNECTION_LIMIT_FIELD "connection_limit"
+set ADDR_FIELD "addr"
+set PORT_FIELD "port"
+set RATIO_FIELD "ratio"
+set HOST_FIELD "host"
+set ONE_SPACE " "
+set ALL_VLAN_ANSWER "All VLANs"
+set ENABLED_ON_ANSWER "Enabled on ..."
+set DIABLED_ON_ANSWER "Disabled on ..."
+
+proc tmsh_create { component arguments } {
+    regsub -all {\"} $arguments "\\\"" arguments
+    regsub -all {\[} $arguments "\\\[" arguments
+    regsub -all {\]} $arguments "\\\]" arguments
+    tmsh::run_proc f5.app_utils:do_tmsh_create "\"$component\"" "\"$arguments\""
+}
+
+proc tmsh_modify { component arguments } {
+    regsub -all {\"} $arguments "\\\"" arguments
+    regsub -all {\[} $arguments "\\\[" arguments
+    regsub -all {\]} $arguments "\\\]" arguments
+    tmsh::run_proc f5.app_utils:do_tmsh_modify "\"$component\"" "\"$arguments\""
+}
+
+# Modified version of create_vs to support transparent virtual Servers
+proc create_wbsn_internal_vs { 
+        name_prefix         
+        snat
+        pool_name 
+        profile_names 
+        persist_profile
+        tcp_server_profile_name 
+        tcp_client_profile_name
+        vlan_action } {
+
+    set vs_name [format "%s_%s" $name_prefix virtual]
+
+    set destination "0.0.0.0:0"
+    set type "internal"
+    set ip_protocol "tcp"
+    set mask "any"
+    set sourceip "0.0.0.0/0"
+    set translations "translate-address disabled translate-port disabled"
+
+    set snat_action "source-address-translation \{ type none \}"
+    if { $snat != $::EMPTY_STRING } {
+        if { $snat == "none" } {
+            set snat_action "source-address-translation \{ type none \} "
+        } elseif { $snat == "automap" } {
+            set snat_action "source-address-translation \{ type automap \} "
+        } else {
+            set snat_action "source-address-translation \{ type snat pool $snat \} "
+        }
+    }
+
+    if { $pool_name == $::EMPTY_STRING } {
+        set pool_action "pool none"
+    } else {
+        set pool_action [format "pool %s" $pool_name]
+    }
+
+    tmsh_create "/ ltm virtual" "$vs_name \{ destination $destination $type ip-protocol $ip_protocol mask $mask $pool_action profiles none source $sourceip $snat_action $translations \}"
+
+    if { $profile_names != $::EMPTY_STRING } {
+        tmsh_modify "/ ltm virtual" "$vs_name profiles replace-all-with $profile_names"
+    }
+
+    if { $vlan_action != $::EMPTY_STRING } {
+        tmsh_modify "/ ltm virtual" "$vs_name $vlan_action"
+    }
+
+    if { $tcp_server_profile_name == $tcp_client_profile_name } {
+        tmsh_modify "/ ltm virtual" "$vs_name profiles add \{ $tcp_server_profile_name \{ context all \} \}"
+    } else {
+        tmsh_modify "/ ltm virtual" "$vs_name profiles add \{ $tcp_server_profile_name \{ context serverside \} \}"
+        tmsh_modify "/ ltm virtual" "$vs_name profiles add \{ $tcp_client_profile_name \{ context clientside \} \}"
+    }
+
+    return $vs_name
+}
+
+proc create_wbsn_monitor {
+        name_prefix
+        monitor_interval
+        monitor_send
+        monitor_recv
+        monitor_type } {
+
+    set monitor_name [format "%s_%s" $name_prefix monitor]
+    tmsh_create "/ ltm monitor $monitor_type" "$monitor_name interval $monitor_interval recv $monitor_recv send $monitor_send"
+
+    return $monitor_name
+}
+
+proc configure_websense_icap_deployment {} {
+
+    # create monitor
+    if { $::server_pools__create_new_monitor == $::CREATE_NEW_MONITOR_OPTION} {
+        set monitor_interval $::server_pools__monitor_interval
+        set monitor_recv \"$::server_pools__monitor_recv\"
+        set monitor_send \"$::server_pools__monitor_send\"
+        set monitor_type tcp
+
+        set monitor_name [create_wbsn_monitor \
+            $tmsh::app_name $monitor_interval "$monitor_send" \
+            "$monitor_recv" $monitor_type ]
+
+    } elseif { $::server_pools__create_new_monitor == $::CREATE_NEW_MONITOR_WEBSENSEPROTECTOR } {
+        set monitor_interval $::server_pools__monitor_interval
+        set monitor_recv "\"ICAP/1.0 200 OK\""
+        set monitor_send "\"REQMOD icap://127.0.0.1/reqmod ICAP/1.0\\\\r\\\\nHost: 127.0.0.1\\\\r\\\\nEncapsulated: req-hdr=0, req-body=35\\\\r\\\\n\\\\r\\\\nGET / HTTP/1.1\\\\r\\\\nHost: 127.0.0.1\\\\r\\\\n\\\\r\\\\n0; ieof\\\\r\\\\n\\\\r\\\\n\""
+        set monitor_type tcp
+
+        set monitor_name [create_wbsn_monitor \
+            $tmsh::app_name $monitor_interval "$monitor_send" \
+            "$monitor_recv" $monitor_type ]
+
+    } else {
+        set monitor_name $::server_pools__reuse_monitor_name
+    }
+    # end create monitor
+
+    # Setup connection queuing 
+    set do_queuing $::server_pools__tcp_request_queuing_enable_question
+    if { $do_queuing == $::YES_ANSWER } {
+        set queue_length $::server_pools__tcp_request_queue_length
+        set time_limit $::server_pools__tcp_request_queue_timeout
+    } else {
+        set queue_length 0
+        set time_limit 0
+    }
+
+    # create pool
+    set servers $::server_pools__servers
+    set lb_method $::server_pools__lb_method_choice
+
+    set ::PORT_FIELD "port"
+    set pool_name_icap [tmsh::run_proc f5.app_utils:create_pool \
+        ${tmsh::app_name}_icap $monitor_name "\{$servers\}" $lb_method ]
+    tmsh::run_proc f5.app_utils:do_tcp_request_queue_settings \
+        $pool_name_icap $do_queuing $queue_length $time_limit
+
+    # end create pool
+
+    # create TCP profiles
+    set tcp_profile_name_lan [format "%s_%s" $tmsh::app_name lan-optimized_tcp_profile]
+    tmsh_create "/ ltm profile tcp" "$tcp_profile_name_lan defaults-from tcp-lan-optimized"
+
+    set tcp_server_profile_name $tcp_profile_name_lan
+
+    if { $::optimizations__lan_or_wan == $::WAN_OPTION } {
+        set tcp_profile_name_wan [format "%s_%s" $tmsh::app_name wan-optimized_tcp_profile]
+        tmsh_create "/ ltm profile tcp" "$tcp_profile_name_wan defaults-from tcp-wan-optimized"
+
+        set tcp_client_profile_name $tcp_profile_name_wan
+    } else {
+        set tcp_client_profile_name $tcp_profile_name_lan
+    }
+
+    # create persist profile
+    set persist_profile [format "%s_%s" $tmsh::app_name persistence_profile]
+    set persist_profile_attr \{ 
+    append persist_profile_attr "defaults-from source_addr "
+    append persist_profile_attr "match-across-pools disabled "
+    append persist_profile_attr "match-across-services enabled "
+    append persist_profile_attr "match-across-virtuals disabled "
+    append persist_profile_attr \}
+    tmsh_create "/ ltm persistence source-addr" "$persist_profile $persist_profile_attr"
+
+    # SNAT
+    if { $::server_pools__snat == $::NO_ANSWER } {
+        set server_pools_snat "automap"
+
+        if { $::server_pools__need_snatpool == $::YES_ANSWER } {
+            set members \{
+            foreach member $::server_pools__snatpool_members {
+                append members [tmsh::get_field_value $member addr]
+                append members " "
+            }
+            append members \}
+
+            set server_pools_snat [format "%s_icap_snatpool" $tmsh::app_name ]
+            tmsh_create "/ ltm snatpool" "$server_pools_snat members replace-all-with $members"
+            }
+    } else {
+        set server_pools_snat "none"
+    }
+
+    # VLAN Enabled / Disabled
+    set icap_vlan_enable_disable $::server_pools__icap_vlan_listening
+    if { $icap_vlan_enable_disable != $::ALL_VLAN_ANSWER } {
+        if { $icap_vlan_enable_disable == $::ENABLED_ON_ANSWER } {
+            set icap_vlan_action "vlans-enabled vlans "
+        } else {
+            set icap_vlan_action "vlans-disabled vlans "
+        }
+        if { [info exists ::explicit__icap_vlan_selections] } {
+            append icap_vlan_action "replace-all-with \{"
+            append icap_vlan_action $::server_pools__icap_vlan_selections
+            append icap_vlan_action \}
+        } else {
+            append icap_vlan_action "none"
+        }
+    } else {
+        set icap_vlan_action $::EMPTY_STRING
+    }
+
+    # create VS
+    set icap_internal_vs_name [create_wbsn_internal_vs ${tmsh::app_name}_icap \
+        $server_pools_snat $pool_name_icap $::EMPTY_STRING $persist_profile \
+        $tcp_server_profile_name $tcp_client_profile_name $icap_vlan_action]
+
+
+    # Create ICAP Profile
+    set icap_profile [format "%s_%s" $tmsh::app_name icap_profile]
+    set icap_profile_attr \{ 
+    append icap_profile_attr "defaults-from icap "
+    append icap_profile_attr "preview-length 10485760 "
+    append icap_profile_attr "uri \"icap://\\\${SERVER_IP}:\\\${SERVER_PORT}/reqmod\" "
+    append icap_profile_attr \}
+    tmsh_create "/ ltm profile icap" "$icap_profile $icap_profile_attr"
+
+    # Create Request Adapt Profile
+    set requestadapt_profile [format "%s_%s" $tmsh::app_name requestadapt_profile]
+    set requestadapt_profile_attr \{ 
+    append requestadapt_profile_attr "defaults-from requestadapt "
+    append requestadapt_profile_attr "preview-size 10485760 "
+    append requestadapt_profile_attr "internal-virtual $icap_internal_vs_name "
+    append requestadapt_profile_attr \}
+    tmsh_create "/ ltm profile request-adapt" "$requestadapt_profile $requestadapt_profile_attr"
+
+}
+
+puts " "
+puts " "
+puts "Starting Websense Protector ICAP template."
+puts " "
+
+set provisioned [tmsh::run_proc f5.app_utils:get_provisioned ltm]
+if { $provisioned == "provisioned" } {
+    if { [tmsh::run_proc f5.app_utils:is_safe_app_name "\"$tmsh::app_name\""] != true } {
+        puts "The app template name contained illegal characters."
+        error "The app template name contained illegal characters."
+    }
+    configure_websense_icap_deployment
+} else {
+    puts "The app template failed because LTM is required."
+    error "The app template failed because LTM is required."
+}
+
+puts " "
+puts "Ending Websense Protector ICAP template."
+puts " "
+
+
+            }
+            presentation {
+                include "/Common/f5.apl_common"
+
+
+
+
+section intro {
+    message hello "Websense TRITON AP-DATA solutions"
+    optional ( hello == "NEVER_SHOW_THIS" ) {
+        choice ltm_provisioned tcl { tmsh::run_proc f5.app_utils:get_provisioned ltm }
+        choice is_viprion tcl { tmsh::run_proc f5.app_utils:get_is_viprion }
+    }
+
+    optional ( ltm_provisioned != "provisioned" ) {
+        message sorry "We are sorry but you must license and provision the LTM module to use this template."
+    }
+}
+optional ( intro.ltm_provisioned == "provisioned" ) {
+    section server_pools {
+        choice lb_method_choice default "predictive-node" display "xlarge" {
+            "Dynamic Ratio (member)" => "dynamic-ratio-member",
+            "Dynamic Ratio (node)" => "dynamic-ratio-node",
+            "Fastest (application)" => "fastest-app-response",
+            "Fastest (node)" => "fastest-node",
+            "Least Connections (member)" => "least-connections-member",
+            "Least Connections (node)" => "least-connections-node",
+            "Least Sessions" => "least-sessions",
+            "Observed (member)" => "observed-member",
+            "Observed (node)" => "observed-node",
+            "Predictive (member)" => "predictive-member",
+            "Predictive (node)" => "predictive-node",
+            "Round Robin" => "round-robin",
+            "Ratio (member)" => "ratio-member",
+            "Ratio (node)" => "ratio-node",
+            "Ratio (session)" => "ratio-session",        
+            "Ratio Least Connections (member)" => "ratio-least-connections-memeber",
+            "Ratio Least Connections (node)" => "ratio-least-connections-node",
+            "Weighted Least Connections (member)" => "weighted-least-connections-member",
+            "Weighted Least Connections (node)" => "weighted-least-connections-node"
+        }
+
+        table servers {
+            string addr required validator "IpAddress"
+            string port default "1344" required validator "PortNumber" display "small"
+            string connection_limit default "0" required validator "NonNegativeNumber" display "small"
+            optional ( lb_method_choice == "ratio-member" ||
+                    lb_method_choice == "ratio-node" ||
+                    lb_method_choice == "ratio-session" ||
+                    lb_method_choice == "ratio-least-connections-memeber" ||
+                    lb_method_choice == "ratio-least-connections-node" ||
+                    lb_method_choice == "dynamic-ratio-member" ||
+                    lb_method_choice == "dynamic-ratio-node" ) {
+                string ratio default "1" validator "NonNegativeNumber" display "small"
+            }
+        }
+
+        noyes tcp_request_queuing_enable_question
+        optional ( tcp_request_queuing_enable_question == "Yes" ) {
+            message note "TCP request queuing requires you to have a Connection Limit on your pool members."
+            string tcp_request_queue_length default "0" required validator "NonNegativeNumber" display "small"
+            string tcp_request_queue_timeout default "0" required validator "NonNegativeNumber" display "small"
+        }
+
+        choice create_new_monitor display "xlarge" {
+            "Websense protector",
+            "Create Custom Monitor",
+            "Use Monitor..."
+        }
+        optional ( create_new_monitor == "Websense Protector" || create_new_monitor == "Create Custom Monitor" ) {
+            string monitor_interval default "30" required validator "NonNegativeNumber" display "small"
+        }
+        optional ( create_new_monitor == "Create Custom Monitor" ) {
+            string monitor_send default "" required display "xlarge"
+            string monitor_recv display "xlarge"
+        }
+        optional ( create_new_monitor == "Use Monitor..." ) {
+            choice reuse_monitor_name display "xlarge" tcl {
+                tmsh::run_proc f5.app_utils:get_ltm_monitors_filter http https
+            }
+        }
+
+        choice icap_vlan_listening default "All VLANs" display "xlarge" {
+            "All VLANs" => "All VLANs",
+            "Enabled on ..." => "Enabled on ...",
+            "Disabled on ..." => "Disabled on ..."
+        }
+        optional ( icap_vlan_listening != "All VLANs" ) {
+            multichoice icap_vlan_selections tcl {
+                tmsh::run_proc f5.app_utils:get_vlans
+            }
+        }
+        yesno snat
+        optional ( snat == "No" ) {
+            noyes need_snatpool
+            optional ( need_snatpool == "Yes" ) {
+                table snatpool_members {
+                    string addr required validator "IpAddress"
+                }
+            }
+        }
+    }
+    section optimizations {
+        choice lan_or_wan { "LAN", "WAN" }
+    }
+}
+text
+{
+    intro "Welcome to the Websense TRITON AP-DATA Protector ICAP iApp"
+    intro.hello "This template supports:"
+    intro.sorry "We're sorry:"
+
+    server_pools "Websense Server Pool, Load Balancing, and Service Monitor"
+    server_pools.lb_method_choice "Which load balancing method do you want to use?"
+    server_pools.servers "What are the IP addresses of the Websense Protectors?"
+    server_pools.servers.addr "Address"
+    server_pools.servers.port "ICAP Port"
+    server_pools.servers.ratio "Ratio"
+    server_pools.servers.connection_limit "Connection Limit"
+    server_pools.tcp_request_queuing_enable_question "Do you want the BIG-IP to queue TCP requests?"
+    server_pools.note "Note:"
+    server_pools.tcp_request_queue_length "Specify the TCP request queue length. Choose 0 for unlimited."
+    server_pools.tcp_request_queue_timeout "Specify a timeout for TCP request queuing in milliseconds. Choose 0 for unlimited."
+
+    server_pools.create_new_monitor "Do you want to create a new health monitor or use an existing one?"
+    server_pools.monitor_interval "How often (in seconds) do you want the BIG-IP system to check on the health of each protector? "
+    server_pools.monitor_send "What HTTP request should be sent to check the health of each protector?"
+    server_pools.monitor_recv "What string can the BIG-IP system expect to see within the health check response for the protector to be considered healthy?"
+    server_pools.reuse_monitor_name "Choose a monitor from the list of available monitors."
+
+    server_pools.icap_vlan_listening "Which VLAN(s) should the internal ICAP virtual server listen on?"
+    server_pools.icap_vlan_selections "VLANs and Tunnels"
+
+    server_pools.snat "Do the protectors have a route back to clients via this BIG-IP system?"
+    server_pools.need_snatpool "Will you have more than 64,000 connections at one time? If so, you will need to enter at least one IP address for each 64,000 connections. "
+    server_pools.snatpool_members "Enter IP addresses that can be used for a SNAT pool. Enter one IP address for each 64,000 connections "
+    server_pools.snatpool_members.addr "Address: "
+
+    optimizations "Protocol Optimization"
+    optimizations.lan_or_wan "Will clients be connecting to this virtual server primarily over a LAN or a WAN?"
+}
+
+
+            }
+            role-acl { admin manager resource-admin }
+            run-as none
+        }
+    }
+    description none
+    requires-bigip-version-max none
+    requires-bigip-version-min none
+    requires-modules none
+}
